@@ -16,6 +16,7 @@ locals {
     environment = var.environment_name
     managed_by  = "terraform"
     purpose     = "handson"
+    test        = "auto-apply"
   }
 }
 

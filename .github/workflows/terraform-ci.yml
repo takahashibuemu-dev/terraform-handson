@@ -11,7 +11,8 @@ on:
 permissions:
   contents: read
   id-token: write
-  pull-requests: read
+  pull-requests: write
+  issues: write
 
 env:
   TF_WORKING_DIR: infra/terraform
@@ -50,7 +51,9 @@ jobs:
             -backend-config="container_name=${{ vars.TF_STATE_CONTAINER }}" \
             -backend-config="key=${{ vars.TF_STATE_KEY }}" \
             -backend-config="use_oidc=true" \
-            -backend-config="use_azuread_auth=true"
+            -backend-config="use_azuread_auth=true" \
+            -backend-config="tenant_id=${{ vars.AZURE_TENANT_ID }}" \
+            -backend-config="client_id=${{ vars.AZURE_CLIENT_ID }}"
 
       - name: Terraform fmt check
         run: terraform fmt -check
@@ -81,3 +84,66 @@ jobs:
           echo "- Target Resource Group: \`${{ vars.TF_TARGET_RESOURCE_GROUP }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           grep -E "Plan:|No changes" plan.txt >> $GITHUB_STEP_SUMMARY || true
+
+      - name: Comment Terraform plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          TF_STATE_KEY: ${{ vars.TF_STATE_KEY }}
+          TF_TARGET_RESOURCE_GROUP: ${{ vars.TF_TARGET_RESOURCE_GROUP }}
+        with:
+          script: |
+            const fs = require('fs');
+
+            const planPath = `${process.env.GITHUB_WORKSPACE}/${process.env.TF_WORKING_DIR}/plan.txt`;
+            const plan = fs.readFileSync(planPath, 'utf8');
+
+            const marker = '<!-- terraform-plan-comment -->';
+            const maxPlanLength = 60000;
+            const planBody = plan.length > maxPlanLength
+              ? plan.substring(0, maxPlanLength) + '\n\n... plan output truncated ...'
+              : plan;
+
+            const body = `${marker}
+            ## Terraform Plan Result
+
+            Terraform planの結果です。
+
+            **Working directory:** \`${process.env.TF_WORKING_DIR}\`  
+            **State key:** \`${process.env.TF_STATE_KEY}\`  
+            **Target Resource Group:** \`${process.env.TF_TARGET_RESOURCE_GROUP}\`
+
+            \`\`\`text
+            ${planBody}
+            \`\`\`
+            `;
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+
+            const comments = await github.rest.issues.listComments({
+              owner,
+              repo,
+              issue_number,
+              per_page: 100
+            });
+
+            const existing = comments.data.find(comment =>
+              comment.user.type === 'Bot' && comment.body.includes(marker)
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number,
+                body
+              });
+            }

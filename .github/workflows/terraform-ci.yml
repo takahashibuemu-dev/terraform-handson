@@ -1,0 +1,83 @@
+name: Terraform CI
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "infra/terraform/**"
+      - ".github/workflows/terraform-ci.yml"
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: read
+
+env:
+  TF_WORKING_DIR: infra/terraform
+  TF_PLAN_FILE: tfplan
+
+jobs:
+  terraform-plan:
+    name: Terraform fmt validate plan
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure login using OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.0
+
+      - name: Terraform init
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ vars.TF_STATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.TF_STATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ vars.TF_STATE_CONTAINER }}" \
+            -backend-config="key=${{ vars.TF_STATE_KEY }}" \
+            -backend-config="use_oidc=true" \
+            -backend-config="use_azuread_auth=true"
+
+      - name: Terraform fmt check
+        run: terraform fmt -check
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Terraform plan
+        run: |
+          terraform plan \
+            -out=${{ env.TF_PLAN_FILE }} \
+            -var-file="terraform.tfvars" \
+            -var="subscription_id=${{ vars.AZURE_SUBSCRIPTION_ID }}" \
+            -var="target_resource_group_name=${{ vars.TF_TARGET_RESOURCE_GROUP }}" \
+            -var="location=${{ vars.LOCATION }}"
+
+      - name: Show Terraform plan
+        run: terraform show -no-color ${{ env.TF_PLAN_FILE }}
+
+      - name: Write plan summary
+        run: |
+          terraform show -no-color ${{ env.TF_PLAN_FILE }} > plan.txt
+
+          echo "## Terraform Plan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Working directory: \`${{ env.TF_WORKING_DIR }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- State key: \`${{ vars.TF_STATE_KEY }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Target Resource Group: \`${{ vars.TF_TARGET_RESOURCE_GROUP }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          grep -E "Plan:|No changes" plan.txt >> $GITHUB_STEP_SUMMARY || true

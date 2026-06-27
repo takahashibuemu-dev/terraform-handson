@@ -21,6 +21,7 @@ locals {
   }
 }
 
+
 resource "azurerm_storage_account" "handson" {
   name                = local.storage_account_name
   resource_group_name = data.azurerm_resource_group.target.name

@@ -8,6 +8,7 @@ on:
       - "infra/terraform/**"
       - ".github/workflows/terraform-ci.yml"
       - ".github/workflows/terraform-apply.yml"
+      - ".github/codex/**"
 
 permissions:
   contents: read
@@ -85,6 +86,13 @@ jobs:
           echo "- Target Resource Group: \`${{ vars.TF_TARGET_RESOURCE_GROUP }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           grep -E "Plan:|No changes" plan.txt >> $GITHUB_STEP_SUMMARY || true
+
+      - name: Upload Terraform plan text
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-text-${{ github.event.pull_request.number }}
+          path: ${{ env.TF_WORKING_DIR }}/plan.txt
+          retention-days: 1
 
       - name: Comment Terraform plan on PR
         if: github.event_name == 'pull_request'

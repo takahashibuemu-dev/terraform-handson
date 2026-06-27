@@ -1,0 +1,225 @@
+name: Terraform Drift Detection
+
+on:
+  schedule:
+    # 毎日 22:00 UTC = 日本時間 07:00 頃
+    - cron: "0 22 * * *"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+
+env:
+  TF_WORKING_DIR: infra/terraform
+  TF_PLAN_FILE: tfplan
+  DRIFT_ISSUE_TITLE: Terraform drift detected for demo/sandbox
+
+jobs:
+  drift-detection:
+    name: Terraform drift detection
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure login using OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.0
+
+      - name: Terraform init
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ vars.TF_STATE_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ secrets.TF_STATE_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ vars.TF_STATE_CONTAINER }}" \
+            -backend-config="key=${{ vars.TF_STATE_KEY }}" \
+            -backend-config="use_oidc=true" \
+            -backend-config="use_azuread_auth=true" \
+            -backend-config="tenant_id=${{ secrets.AZURE_TENANT_ID }}" \
+            -backend-config="client_id=${{ secrets.AZURE_CLIENT_ID }}"
+
+      - name: Terraform plan with detailed exit code
+        id: plan
+        run: |
+          set +e
+
+          terraform plan \
+            -detailed-exitcode \
+            -out=${{ env.TF_PLAN_FILE }} \
+            -var-file="terraform.tfvars" \
+            -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
+            -var="target_resource_group_name=${{ vars.TF_TARGET_RESOURCE_GROUP }}" \
+            -var="location=${{ vars.LOCATION }}"
+
+          exitcode=$?
+          set -e
+
+          echo "exitcode=$exitcode" >> $GITHUB_OUTPUT
+
+          if [ "$exitcode" -eq 1 ]; then
+            echo "terraform plan failed."
+            exit 1
+          fi
+
+      - name: Save Terraform plan text
+        run: |
+          terraform show -no-color ${{ env.TF_PLAN_FILE }} > plan.txt
+
+          echo "## Terraform Drift Detection Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- Working directory: \`${{ env.TF_WORKING_DIR }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- State key: \`${{ vars.TF_STATE_KEY }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Target Resource Group: \`${{ vars.TF_TARGET_RESOURCE_GROUP }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- Terraform plan exit code: \`${{ steps.plan.outputs.exitcode }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ steps.plan.outputs.exitcode }}" = "0" ]; then
+            echo "No changes detected." >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ steps.plan.outputs.exitcode }}" = "2" ]; then
+            echo "Changes detected. A drift issue will be created or updated." >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Create or update drift issue
+        if: steps.plan.outputs.exitcode == '2'
+        uses: actions/github-script@v7
+        env:
+          DRIFT_ISSUE_TITLE: ${{ env.DRIFT_ISSUE_TITLE }}
+          TF_WORKING_DIR: ${{ env.TF_WORKING_DIR }}
+          TF_STATE_KEY: ${{ vars.TF_STATE_KEY }}
+          TF_TARGET_RESOURCE_GROUP: ${{ vars.TF_TARGET_RESOURCE_GROUP }}
+        with:
+          script: |
+            const fs = require('fs');
+
+            const { owner, repo } = context.repo;
+            const title = process.env.DRIFT_ISSUE_TITLE;
+
+            const planPath = `${process.env.GITHUB_WORKSPACE}/${process.env.TF_WORKING_DIR}/plan.txt`;
+            const plan = fs.readFileSync(planPath, 'utf8');
+
+            const maxPlanLength = 60000;
+            const planBody = plan.length > maxPlanLength
+              ? plan.substring(0, maxPlanLength) + '\n\n... plan output truncated ...'
+              : plan;
+
+            const now = new Date().toISOString();
+
+            const body = `## Terraform drift detection
+
+            Terraform plan detected changes during the scheduled drift detection workflow.
+
+            This may mean one of the following:
+
+            - Azure resources were changed outside Terraform.
+            - Terraform code in \`main\` has not yet been applied.
+            - Provider behavior or computed values changed and should be reviewed.
+
+            ## Context
+
+            - Workflow: \`${context.workflow}\`
+            - Run ID: \`${context.runId}\`
+            - Checked at: \`${now}\`
+            - Working directory: \`${process.env.TF_WORKING_DIR}\`
+            - State key: \`${process.env.TF_STATE_KEY}\`
+            - Target Resource Group: \`${process.env.TF_TARGET_RESOURCE_GROUP}\`
+
+            ## Recommended action
+
+            1. Review the Terraform plan below.
+            2. Check whether the change was intentional.
+            3. If the change was made manually in Azure, decide whether to:
+               - revert the manual change, or
+               - import / reflect the change in Terraform code.
+            4. If this is an unapplied Terraform code change, run the normal apply workflow.
+
+            <details>
+            <summary>Terraform plan</summary>
+
+            \`\`\`text
+            ${planBody}
+            \`\`\`
+
+            </details>
+            `;
+
+            const query = `repo:${owner}/${repo} is:issue is:open in:title "${title}"`;
+            const searchResult = await github.rest.search.issuesAndPullRequests({
+              q: query,
+              per_page: 10
+            });
+
+            const existingIssue = searchResult.data.items.find(item => item.title === title);
+
+            if (existingIssue) {
+              await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number: existingIssue.number,
+                body
+              });
+
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: existingIssue.number,
+                body: `Drift detection still reports changes. Updated at ${now}.`
+              });
+            } else {
+              await github.rest.issues.create({
+                owner,
+                repo,
+                title,
+                body
+              });
+            }
+
+      - name: Close drift issue when no changes
+        if: steps.plan.outputs.exitcode == '0'
+        uses: actions/github-script@v7
+        env:
+          DRIFT_ISSUE_TITLE: ${{ env.DRIFT_ISSUE_TITLE }}
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const title = process.env.DRIFT_ISSUE_TITLE;
+            const now = new Date().toISOString();
+
+            const query = `repo:${owner}/${repo} is:issue is:open in:title "${title}"`;
+            const searchResult = await github.rest.search.issuesAndPullRequests({
+              q: query,
+              per_page: 10
+            });
+
+            const existingIssue = searchResult.data.items.find(item => item.title === title);
+
+            if (existingIssue) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: existingIssue.number,
+                body: `No Terraform drift was detected in the latest scheduled check. Closing this issue. Checked at ${now}.`
+              });
+
+              await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number: existingIssue.number,
+                state: 'closed'
+              });
+            }

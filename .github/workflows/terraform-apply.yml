@@ -33,9 +33,9 @@ jobs:
       - name: Azure login using OIDC
         uses: azure/login@v2
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -46,20 +46,20 @@ jobs:
         run: |
           terraform init \
             -backend-config="resource_group_name=${{ vars.TF_STATE_RESOURCE_GROUP }}" \
-            -backend-config="storage_account_name=${{ vars.TF_STATE_STORAGE_ACCOUNT }}" \
+            -backend-config="storage_account_name=${{ secrets.TF_STATE_STORAGE_ACCOUNT }}" \
             -backend-config="container_name=${{ vars.TF_STATE_CONTAINER }}" \
             -backend-config="key=${{ vars.TF_STATE_KEY }}" \
             -backend-config="use_oidc=true" \
             -backend-config="use_azuread_auth=true" \
-            -backend-config="tenant_id=${{ vars.AZURE_TENANT_ID }}" \
-            -backend-config="client_id=${{ vars.AZURE_CLIENT_ID }}"
+            -backend-config="tenant_id=${{ secrets.AZURE_TENANT_ID }}" \
+            -backend-config="client_id=${{ secrets.AZURE_CLIENT_ID }}"
 
       - name: Terraform plan
         run: |
           terraform plan \
             -out=${{ env.TF_PLAN_FILE }} \
             -var-file="terraform.tfvars" \
-            -var="subscription_id=${{ vars.AZURE_SUBSCRIPTION_ID }}" \
+            -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
             -var="target_resource_group_name=${{ vars.TF_TARGET_RESOURCE_GROUP }}" \
             -var="location=${{ vars.LOCATION }}"
 
@@ -106,9 +106,9 @@ jobs:
       - name: Azure login using OIDC
         uses: azure/login@v2
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -119,13 +119,13 @@ jobs:
         run: |
           terraform init \
             -backend-config="resource_group_name=${{ vars.TF_STATE_RESOURCE_GROUP }}" \
-            -backend-config="storage_account_name=${{ vars.TF_STATE_STORAGE_ACCOUNT }}" \
+            -backend-config="storage_account_name=${{ secrets.TF_STATE_STORAGE_ACCOUNT }}" \
             -backend-config="container_name=${{ vars.TF_STATE_CONTAINER }}" \
             -backend-config="key=${{ vars.TF_STATE_KEY }}" \
             -backend-config="use_oidc=true" \
             -backend-config="use_azuread_auth=true" \
-            -backend-config="tenant_id=${{ vars.AZURE_TENANT_ID }}" \
-            -backend-config="client_id=${{ vars.AZURE_CLIENT_ID }}"
+            -backend-config="tenant_id=${{ secrets.AZURE_TENANT_ID }}" \
+            -backend-config="client_id=${{ secrets.AZURE_CLIENT_ID }}"
 
       - name: Download Terraform plan
         uses: actions/download-artifact@v4

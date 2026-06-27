@@ -8,6 +8,7 @@ on:
       - "infra/terraform/**"
       - ".github/workflows/terraform-ci.yml"
       - ".github/workflows/terraform-apply.yml"
+      - ".github/codex/**"
 
 permissions:
   contents: read
@@ -35,9 +36,9 @@ jobs:
       - name: Azure login using OIDC
         uses: azure/login@v2
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -48,13 +49,13 @@ jobs:
         run: |
           terraform init \
             -backend-config="resource_group_name=${{ vars.TF_STATE_RESOURCE_GROUP }}" \
-            -backend-config="storage_account_name=${{ vars.TF_STATE_STORAGE_ACCOUNT }}" \
+            -backend-config="storage_account_name=${{ secrets.TF_STATE_STORAGE_ACCOUNT }}" \
             -backend-config="container_name=${{ vars.TF_STATE_CONTAINER }}" \
             -backend-config="key=${{ vars.TF_STATE_KEY }}" \
             -backend-config="use_oidc=true" \
             -backend-config="use_azuread_auth=true" \
-            -backend-config="tenant_id=${{ vars.AZURE_TENANT_ID }}" \
-            -backend-config="client_id=${{ vars.AZURE_CLIENT_ID }}"
+            -backend-config="tenant_id=${{ secrets.AZURE_TENANT_ID }}" \
+            -backend-config="client_id=${{ secrets.AZURE_CLIENT_ID }}"
 
       - name: Terraform fmt check
         run: terraform fmt -check
@@ -67,7 +68,7 @@ jobs:
           terraform plan \
             -out=${{ env.TF_PLAN_FILE }} \
             -var-file="terraform.tfvars" \
-            -var="subscription_id=${{ vars.AZURE_SUBSCRIPTION_ID }}" \
+            -var="subscription_id=${{ secrets.AZURE_SUBSCRIPTION_ID }}" \
             -var="target_resource_group_name=${{ vars.TF_TARGET_RESOURCE_GROUP }}" \
             -var="location=${{ vars.LOCATION }}"
 
@@ -86,8 +87,77 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           grep -E "Plan:|No changes" plan.txt >> $GITHUB_STEP_SUMMARY || true
 
-      - name: Comment Terraform plan on PR
-        if: github.event_name == 'pull_request'
+      - name: Upload Terraform plan text
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-text-${{ github.event.pull_request.number }}
+          path: ${{ env.TF_WORKING_DIR }}/plan.txt
+          retention-days: 1
+
+  codex-explain:
+    name: Explain Terraform plan with Codex
+    runs-on: ubuntu-latest
+    needs: terraform-plan
+    if: github.event_name == 'pull_request'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Terraform plan text
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan-text-${{ github.event.pull_request.number }}
+          path: codex-input
+
+      - name: Build Codex prompt
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          cp .github/codex/prompts/terraform-plan-explain.md codex-prompt.md
+
+          echo "" >> codex-prompt.md
+          echo "## Pull Request context" >> codex-prompt.md
+          echo "" >> codex-prompt.md
+
+          echo "### Pull Request title" >> codex-prompt.md
+          echo "" >> codex-prompt.md
+          echo '```text' >> codex-prompt.md
+          printf '%s\n' "$PR_TITLE" >> codex-prompt.md
+          echo '```' >> codex-prompt.md
+          echo "" >> codex-prompt.md
+
+          echo "### Pull Request description" >> codex-prompt.md
+          echo "" >> codex-prompt.md
+          echo '```markdown' >> codex-prompt.md
+          if [ -n "$PR_BODY" ]; then
+            printf '%s\n' "$PR_BODY" >> codex-prompt.md
+          else
+            echo "(No pull request description provided.)" >> codex-prompt.md
+          fi
+          echo '```' >> codex-prompt.md
+          echo "" >> codex-prompt.md
+
+          echo "## Terraform plan" >> codex-prompt.md
+          echo "" >> codex-prompt.md
+          echo '```text' >> codex-prompt.md
+
+          head -c 60000 codex-input/plan.txt >> codex-prompt.md
+
+          echo "" >> codex-prompt.md
+          echo '```' >> codex-prompt.md
+
+      - name: Run Codex explanation
+        id: run_codex
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          prompt-file: codex-prompt.md
+          output-file: codex-plan-explanation.md
+          sandbox: read-only
+
+      - name: Comment Codex explanation on PR
         uses: actions/github-script@v7
         env:
           TF_STATE_KEY: ${{ vars.TF_STATE_KEY }}
@@ -96,7 +166,13 @@ jobs:
           script: |
             const fs = require('fs');
 
-            const planPath = `${process.env.GITHUB_WORKSPACE}/${process.env.TF_WORKING_DIR}/plan.txt`;
+            const explanationPath = `${process.env.GITHUB_WORKSPACE}/codex-plan-explanation.md`;
+            const planPath = `${process.env.GITHUB_WORKSPACE}/codex-input/plan.txt`;
+
+            const explanation = fs.existsSync(explanationPath)
+              ? fs.readFileSync(explanationPath, 'utf8')
+              : 'Codexの解説ファイルが見つかりませんでした。';
+
             const plan = fs.readFileSync(planPath, 'utf8');
 
             const marker = '<!-- terraform-plan-comment -->';
@@ -108,15 +184,26 @@ jobs:
             const body = `${marker}
             ## Terraform Plan Result
 
-            Terraform planの結果です。
+            ### Codexによる解説
 
-            **Working directory:** \`${process.env.TF_WORKING_DIR}\`  
-            **State key:** \`${process.env.TF_STATE_KEY}\`  
-            **Target Resource Group:** \`${process.env.TF_TARGET_RESOURCE_GROUP}\`
+            ${explanation}
+
+            ---
+
+            <details>
+            <summary>Raw Terraform Plan</summary>
 
             \`\`\`text
             ${planBody}
             \`\`\`
+
+            </details>
+
+            ---
+
+            **Working directory:** \`${process.env.TF_WORKING_DIR}\`  
+            **State key:** \`${process.env.TF_STATE_KEY}\`  
+            **Target Resource Group:** \`${process.env.TF_TARGET_RESOURCE_GROUP}\`
             `;
 
             const { owner, repo } = context.repo;

@@ -111,10 +111,34 @@ jobs:
           path: codex-input
 
       - name: Build Codex prompt
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           cp .github/codex/prompts/terraform-plan-explain.md codex-prompt.md
 
           echo "" >> codex-prompt.md
+          echo "## Pull Request context" >> codex-prompt.md
+          echo "" >> codex-prompt.md
+
+          echo "### Pull Request title" >> codex-prompt.md
+          echo "" >> codex-prompt.md
+          echo '```text' >> codex-prompt.md
+          printf '%s\n' "$PR_TITLE" >> codex-prompt.md
+          echo '```' >> codex-prompt.md
+          echo "" >> codex-prompt.md
+
+          echo "### Pull Request description" >> codex-prompt.md
+          echo "" >> codex-prompt.md
+          echo '```markdown' >> codex-prompt.md
+          if [ -n "$PR_BODY" ]; then
+            printf '%s\n' "$PR_BODY" >> codex-prompt.md
+          else
+            echo "(No pull request description provided.)" >> codex-prompt.md
+          fi
+          echo '```' >> codex-prompt.md
+          echo "" >> codex-prompt.md
+
           echo "## Terraform plan" >> codex-prompt.md
           echo "" >> codex-prompt.md
           echo '```text' >> codex-prompt.md

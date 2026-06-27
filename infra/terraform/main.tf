@@ -17,6 +17,7 @@ locals {
     managed_by  = "terraform"
     purpose     = "handson"
     test        = "auto-apply"
+    reviewed_by = "codex"
   }
 }
 
